@@ -1,0 +1,171 @@
+---
+title: "Project 2 Classification Set"
+author: "Jane Shen"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+# Data Cleaning
+Link to the data : https://www.kaggle.com/aaronschlegel/austin-animal-center-shelter-intakes-and-outcomes
+
+aac_outcome.csv is a dataset of animals reported in the Austin Animal Shelter.
+
+
+These columns were removed because they are unnecessary :
+
+- animal_id, date_of_birth, datetime, monthyear, name, outcome_subtype
+
+```{r}
+# Load data set
+Animal <- read.csv("aac_outcomes.csv", stringsAsFactors=TRUE, header=TRUE)
+df <- Animal
+
+# Remove unwanted columns
+drop <- c("animal_id","date_of_birth","datetime","monthyear","name","outcome_subtype", "color")
+df <- df[,!(names(df) %in% drop)]
+
+# Convert empty strings to NA to make cleaning easier
+library(dplyr)
+df <- mutate_all(df, list(~na_if(.,"")))
+
+# Remove rows with sex_upon_outcome "Unknown"
+df <- df[!df$sex_upon_outcome=="Unknown",]
+
+# Remove rows with age_upon_outcome "NULL"
+df <- df[!df$age_upon_outcome=="NULL",]
+
+# Convert outcome_type to a binary column, either adopted or not
+df$outcome_type <- ifelse(df$outcome_type=="Adoption", 1, 0)
+
+# Convert age_upon_outcome to days instead of weeks/months/years
+library(stringi)
+convert_days <- function(str) {
+  days <- as.integer(stri_extract_first_regex(str,"[0-9]+"))
+  type <- stri_extract_first_regex(str,"[a-z]")
+  if(type=="w"){
+    days <- days * 7
+  }
+  if(type=="m"){
+    days <- days * 30
+  }
+  if(type=="y"){
+    days <- days * 365
+  }
+  return(days)
+}
+
+df$age_upon_outcome <- lapply(df$age_upon_outcome, convert_days)
+df$age_upon_outcome <- as.numeric(df$age_upon_outcome)
+
+# Broaden the levels with high variance
+df$breed <- ifelse(is.na(stri_extract_first_regex(df$breed,"Mix")), 0, 1)
+
+# Factor columns as needed
+df$outcome_type <- as.factor(df$outcome_type)
+df$breed <- as.factor(df$breed)
+
+# Keep only complete observations
+df <- df[complete.cases(df),]
+
+```
+
+# Data Exploration
+```{r}
+summary(df)
+dim(df)
+names(df)
+str(df)
+head(df)
+
+hist(df$age_upon_outcome, col="pink", main="Histogram of Animal Ages", xlab="Age by Days")
+plot(df$outcome_type, df$age_upon_outcome, xlab="Outcome", ylab="Age by Days", main="Adoption Based on Age", col="pink", pch=1)
+plot(df$outcome_type, df$animal_type, xlab="Outcome", ylab="Type of Animal", main="Adoption Based on Animal", col="pink", pch=1)
+```
+
+
+# Modeling
+The models will predict on adoption using all other features left in the data set after cleaning. A logistic regression model shows that all leftover features are important predictors. We separate data into train and test sets of 75% and 25% respectively, Accuracy comparisons are listed at the bottom of the notebook.
+```{r}
+# Divide into train and test sets
+set.seed(1234)
+i <- sample(1:nrow(df), nrow(df) * 0.75, replace=FALSE)
+train <- df[i,]
+test <- df[-i,]
+```
+
+# Logistic Regression
+Prediction accuracy was decent, the middle of the 3 models. After changing breed from specific breeds to mixed and non mixed, it appears to no longer be a favorable predictors. Livestock animal type is also a poor predictor, but that is to be expected because there are likely not many livestock in the data set.
+```{r}
+# Build the Model
+glm1 <- glm(outcome_type~., data=train, family=binomial)
+summary(glm1)
+
+# Evaluate on test data
+probs_glm <- predict(glm1, newdata=test, type="response")
+pred_glm <- ifelse(probs_glm>0.5, 1, 0)
+acc_glm <- mean(pred_glm==test$outcome_type)
+
+print(paste("glm1 accuracy: ", acc_glm))
+```
+# Naive Bayes
+Prediction accuracy was the poorest of all 3 models, likely because Naive Bayes is meant for smaller data sets, and this data set includes more than 70,000 observations.
+```{r}
+# Build the model
+library(e1071)
+nb1 <- naiveBayes(outcome_type~., data=train)
+summary(nb1)
+
+# Evaluate on test data
+pred_nb <- predict(nb1, newdata=test, type="class")
+acc_nb <- mean(pred_nb==test$outcome_type)
+
+print(paste("nb1 accuracy: ", acc_nb))
+```
+
+# Decision Tree
+Prediction accuracy was the highest of all 3 models, and no pruning was necessary either as the default tree was well balanced and simple.
+```{r}
+# Build the model
+library(tree)
+tree1 <- tree(outcome_type~., data=train)
+plot(tree1)
+text(tree1, cex=0.5, pretty=0)
+
+# Evaluate on test data
+pred_tree <- predict(tree1, newdata=test, type="class")
+acc_tree <- mean(pred_tree == test$outcome_type)
+
+print(paste("tree1 accuracy: ", acc_tree))
+```
+
+# Ensemble Method
+The ensemble method XGBoost did better than all other models at an accuracy of 0.7460. Others made between 0.730 0.743, which are quite close. Feature selection for XGBoost remains the same as for other models to get a better comparison between algorithms.
+```{r}
+# Build the model
+library(xgboost)
+bst1 <- xgboost(data=data.matrix(train[,-4], rownames.force=NA), label=data.matrix(train[,4], rownames.force=NA), nround=100, objective="binary:logistic")
+summary(bst1)
+
+# Evaluate on test set
+prob_bst <- predict(bst1, data.matrix(test[,-4], rownames.force=NA))
+pred_bst <- ifelse(prob_bst>0.5, 1, 0)
+
+acc_bst <- mean(pred_bst==test$outcome_type)
+
+print(paste("bst1 accuracy: ", acc_bst))
+```
+
+# Comparison and Analysis
+Best to worst accuracy
+
+- XGBoost Accuracy : 0.7460
+- Decision Tree Accuracy : 0.7422
+- Logistic Regression Accuracy : 0.7321
+- Naive Bayes Accuracy : 0.7248
+
+Unsurprisingly, XGBoost won in accuracy, even though it is slight. This is expected because XGBoost is known to be better than other models in both accuracy, speed, and interpretability.
+
+The decision tree model had the best accuracy of all 3 models, likely because logistic regression assumes a linear data set, and naive bayes does not work well with large data sets. The tree was also very simple and balanced, which is favorable for its prediction accuracy.
+
+From the results of the data, we can see that female/intact male animals between 6 months and 3 years tend to be the most adopted. Additionally, cats and dogs tend to be adopted the most, as expected, with birds following closely. Surprisingly, to me, the lean was towards cats and not dogs, even if it was slight.
